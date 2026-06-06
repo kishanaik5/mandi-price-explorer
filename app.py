@@ -173,11 +173,46 @@ else:
     else:
         st.info("Enter your city/district above to rank the nearest mandis.")
 
+# ------------------------------ Price forecast ------------------------------
+st.divider()
+st.markdown("#### 📈 Price forecast")
+if commodity == "All":
+    st.info("Select a specific commodity in the sidebar to forecast its modal price.")
+else:
+    fc_markets = unique_values(scoped, "Market")
+    fcol1, fcol2 = st.columns([2, 1])
+    fc_market = fcol1.selectbox("Market to forecast", options=fc_markets) if fc_markets else None
+    horizon = fcol2.slider("Weeks ahead", 4, 12, 8)
+    if fc_market and st.button("Run forecast"):
+        from services.forecast import fetch_price_history, forecast_prices, to_weekly
+
+        try:
+            with st.spinner(f"Fetching history & forecasting {commodity} @ {fc_market}…"):
+                hist_df = fetch_price_history(
+                    api_key, commodity, state, market=fc_market,
+                    variety=None if variety == "All" else variety,
+                )
+                result = forecast_prices(to_weekly(hist_df), horizon=horizon)
+            chart = pd.concat(
+                [result.history.rename("History"), result.forecast.rename("Forecast")], axis=1
+            )
+            st.line_chart(chart, height=320)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Weeks of history", result.n_weeks)
+            m2.metric("Next-week forecast ₹/qtl", f"{result.forecast.iloc[0]:,.0f}")
+            m3.metric("Backtest RMSE ₹", f"{result.rmse:,.0f}" if result.rmse else "—")
+            st.caption(
+                f"Trained on {result.training_window}. Recursive weekly forecast "
+                "(each week feeds the next), smoothed to limit drift. Decision support only."
+            )
+        except (RuntimeError, ValueError) as exc:
+            st.warning(str(exc))
+
 # ------------------------------ How it works --------------------------------
 with st.expander("ℹ️ How it works"):
     st.markdown(
         """
-        **Pipeline:** data.gov.in API → filter → geo → visualize
+        **Pipeline:** data.gov.in API → filter → geo → forecast
 
         1. **Fetch** — Records are pulled from the data.gov.in *Variety-wise Daily
            Market Prices* resource with pagination, sorted by `Arrival_Date`
@@ -193,8 +228,15 @@ with st.expander("ℹ️ How it works"):
            (optional live OpenStreetMap fallback). Distances use the Haversine
            great-circle formula; the map shows you plus the nearest mandis.
 
+        5. **Forecast** — For a chosen commodity + market, the daily history is
+           resampled to a weekly modal price, lag (1/2/7) + rolling + seasonal
+           (sin/cos of week) features are built, a gradient-boosting model is fit,
+           and a recursive multi-week forecast is rolled forward. A holdout
+           backtest reports RMSE.
+
         **Limitation:** the static lookup covers major districts only — markets in
         uncovered districts are omitted from ranking/map unless the live geocoder
-        is enabled. Prices are in ₹ per quintal as reported by the source.
+        is enabled. Forecasts are statistical decision-support, not guarantees.
+        Prices are in ₹ per quintal as reported by the source.
         """
     )

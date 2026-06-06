@@ -26,6 +26,8 @@ compare modal prices across markets — built entirely on the public
 - Cascading sidebar filters: State (server-side) → Commodity → District → Variety.
 - Summary metric cards, a sortable price table, and a modal-price bar chart.
 - Nearest-mandi ranking by Haversine distance, plus an interactive map.
+- **Weekly price forecasting** (lag + seasonal features → gradient boosting →
+  recursive multi-week forecast) with a holdout-RMSE backtest.
 
 ## Architecture (pipeline)
 
