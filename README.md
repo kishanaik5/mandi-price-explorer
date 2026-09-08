@@ -2,10 +2,9 @@
 title: Mandi Price Explorer
 emoji: 🌾
 colorFrom: green
-colorTo: blue
-sdk: streamlit
-sdk_version: 1.40.2
-app_file: app.py
+colorTo: yellow
+sdk: docker
+app_port: 7860
 pinned: false
 ---
 
