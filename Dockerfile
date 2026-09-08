@@ -10,7 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Create non-root user for Hugging Face Spaces (UID 1000)
-RUN useradd -m -u 1000 user
+RUN useradd -m -u 1000 user && \
+    mkdir -p /var/log/nginx /var/lib/nginx /tmp && \
+    chown -R user:user /var/log/nginx /var/lib/nginx /tmp && \
+    chmod -R 777 /var/log/nginx /var/lib/nginx /tmp
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH
 

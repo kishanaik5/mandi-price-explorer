@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Ensure temp and log directories exist for Nginx
+mkdir -p /tmp/client_temp /tmp/proxy_temp_path /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
+touch /tmp/access.log /tmp/error.log
+
 echo "Starting Streamlit UI on internal port 8501..."
 streamlit run app.py \
     --server.port 8501 \
