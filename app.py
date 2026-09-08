@@ -1,8 +1,8 @@
 """Mandi Price Explorer — Streamlit UI.
 
-Browse variety-wise daily Indian market prices from data.gov.in, find the
-nearest mandi, and compare modal prices across markets. All business logic lives
-in ``services/``; this file is the UI shell only.
+Browse variety-wise daily Indian market prices from data.gov.in and compare modal
+prices across markets. All business logic lives in ``services/``; this file is the
+UI shell only.
 """
 from __future__ import annotations
 
@@ -10,15 +10,14 @@ import pandas as pd
 import streamlit as st
 
 from services.datagov_client import fetch_records, unique_values
-from services.geo import geocode_place, nearest_markets
 from utils.config import API_KEY_ENV, get_api_key
 
 st.set_page_config(page_title="Mandi Price Explorer", page_icon="🌾", layout="wide")
 
 st.title("🌾 Mandi Price Explorer")
 st.caption(
-    "Browse variety-wise daily Indian market prices, find the nearest mandi, "
-    "and compare prices across markets — powered by the data.gov.in public API."
+    "Browse variety-wise daily Indian market prices and compare prices across markets — "
+    "powered by the data.gov.in public API."
 )
 
 
@@ -95,14 +94,6 @@ with st.sidebar:
     if variety != "All":
         scoped = scoped[scoped["Variety"] == variety]
 
-    st.divider()
-    st.subheader("Nearest mandi")
-    place = st.text_input("Your city / district", placeholder="e.g. Pune")
-    use_live_geo = st.checkbox(
-        "Use live geocoder for misses", value=False,
-        help="Falls back to OpenStreetMap (geopy) when a district isn't in the bundled lookup.",
-    )
-
 # ------------------------------- Main: results -------------------------------
 latest_date = scoped["Arrival_Date"].max()
 st.subheader(f"{commodity if commodity != 'All' else 'All commodities'} in {state}")
@@ -139,39 +130,6 @@ if not latest_per_market.empty:
     st.bar_chart(latest_per_market, height=350)
 else:
     st.info("No modal prices available to chart for the current selection.")
-
-# Nearest mandi + map
-st.markdown("#### Nearest mandis & map")
-coords = geocode_place(place, use_live=use_live_geo) if place else None
-if place and coords is None:
-    st.warning(
-        f"Couldn't locate '{place}' in the bundled lookup. Try a major district "
-        "name or enable the live geocoder in the sidebar."
-    )
-
-if coords:
-    user_lat, user_lon = coords
-    ranked = nearest_markets(user_lat, user_lon, scoped, use_live=use_live_geo, top_n=10)
-    if ranked.empty:
-        st.info("None of the markets in view could be geocoded for ranking.")
-    else:
-        st.write(f"Closest mandis to **{place}** ({user_lat:.3f}, {user_lon:.3f}):")
-        st.dataframe(ranked, use_container_width=True, hide_index=True)
-        map_df = ranked[["lat", "lon"]].copy()
-        map_df = pd.concat(
-            [map_df, pd.DataFrame({"lat": [user_lat], "lon": [user_lon]})], ignore_index=True
-        )
-        st.map(map_df)
-else:
-    # Fall back to mapping all geocodable markets in view.
-    from services.geo import attach_coords
-
-    located = attach_coords(scoped, use_live=use_live_geo)
-    if not located.empty:
-        st.caption("Markets located from the bundled district lookup:")
-        st.map(located[["lat", "lon"]])
-    else:
-        st.info("Enter your city/district above to rank the nearest mandis.")
 
 # ------------------------------ Price forecast ------------------------------
 st.divider()
@@ -212,7 +170,7 @@ else:
 with st.expander("ℹ️ How it works"):
     st.markdown(
         """
-        **Pipeline:** data.gov.in API → filter → geo → forecast
+        **Pipeline:** data.gov.in API → filter → summarize → forecast
 
         1. **Fetch** — Records are pulled from the data.gov.in *Variety-wise Daily
            Market Prices* resource with pagination, sorted by `Arrival_Date`
@@ -223,20 +181,13 @@ with st.expander("ℹ️ How it works"):
            API exactly. Commodity, District, and Variety are refined client-side.
         3. **Summarize** — Min/Max/Modal prices feed the metric cards and table;
            the bar chart shows the latest modal price per market.
-        4. **Geo** — Markets carry no coordinates, so each is geocoded by its
-           **District** against a bundled static lookup of major Indian districts
-           (optional live OpenStreetMap fallback). Distances use the Haversine
-           great-circle formula; the map shows you plus the nearest mandis.
-
-        5. **Forecast** — For a chosen commodity + market, the daily history is
+        4. **Forecast** — For a chosen commodity + market, the daily history is
            resampled to a weekly modal price, lag (1/2/7) + rolling + seasonal
            (sin/cos of week) features are built, a gradient-boosting model is fit,
            and a recursive multi-week forecast is rolled forward. A holdout
            backtest reports RMSE.
 
-        **Limitation:** the static lookup covers major districts only — markets in
-        uncovered districts are omitted from ranking/map unless the live geocoder
-        is enabled. Forecasts are statistical decision-support, not guarantees.
+        **Note:** Forecasts are statistical decision-support, not guarantees.
         Prices are in ₹ per quintal as reported by the source.
         """
     )

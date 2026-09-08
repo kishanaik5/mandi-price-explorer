@@ -3,5 +3,3 @@ pandas==2.2.3
 numpy==2.1.3
 requests==2.32.3
 scikit-learn==1.5.2
-# Optional: live geocoding fallback for districts not in the bundled lookup.
-geopy==2.4.1
