@@ -4,19 +4,11 @@ Clean-room, public-data forecaster built on the data.gov.in history: resample to
 weekly modal price, engineer lag + seasonal features, fit a small ensemble of
 regressors, and roll a recursive multi-week forecast forward. A simple holdout
 backtest reports RMSE so users can gauge reliability.
-
-Two entry points:
-  - forecast_prices(...)      -> longer-horizon forecast (default 8 weeks) using
-                                  the full weekly history you pass in.
-  - fit_and_forecast(...)     -> short-window mode: trains on a smaller recent
-                                  slice and forecasts a few weeks ahead. Useful
-                                  for a "what does the near-term look like"
-                                  view in the playground UI.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,14 +22,12 @@ from services.datagov_client import fetch_records
 FEATURES = ["lag1", "lag2", "lag7", "rolling_mean", "rolling_std",
             "month", "week", "sin_season", "cos_season"]
 SHORT_FEATURES = ["lag1", "lag2", "rolling_mean", "rolling_std",
-                   "month", "week", "sin_season", "cos_season"]
+                  "month", "week", "sin_season", "cos_season"]
 
 MIN_WEEKS_REQUIRED = 12       # below this, fall back to the short feature set
 FIT_FORECAST_WEEKS = 4        # horizon for fit_and_forecast()
 _SMOOTHING = 0.2              # blend each prediction with the last value to avoid runaway drift
 
-# Small ensemble — kept lightweight (no LightGBM/CatBoost/XGBoost) so the
-# playground has no extra native-library install/build burden.
 def _base_models() -> List[tuple]:
     return [
         ("GBR", GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, random_state=42)),
@@ -48,26 +38,24 @@ def _base_models() -> List[tuple]:
 @dataclass
 class ForecastResult:
     """Historical weekly series + the forward forecast and backtest metric."""
-
-    history: pd.Series                    # weekly modal price (indexed by week)
-    forecast: pd.Series                   # ensemble-mean predicted weekly modal price
-    model_forecasts: Dict[str, pd.Series] = field(default_factory=dict)  # per-model forecasts
-    rmse: Optional[Dict[str, float]] = None  # per-model holdout RMSE (None if too short to test)
-    training_window: str = ""
-    n_weeks: int = 0
+    # Simplified to match Snippet 2 exactly
+    history: pd.Series        
+    forecast: pd.Series       
+    rmse: Optional[float]     
+    training_window: str
+    n_weeks: int
 
 
 @dataclass
 class FitForecastResult:
     """Short-window fit + near-term forecast, for a compact playground view."""
-
+    # Simplified to return single series/floats instead of dictionaries
     train_dates: pd.Index
     train_actual: pd.Series
-    train_fits: Dict[str, pd.Series]        # per-model in-sample fit
+    train_fit: pd.Series          # ensemble mean in-sample fit
     forecast_dates: pd.Index
-    forecast_preds: Dict[str, pd.Series]    # per-model forecast
-    forecast_mean: pd.Series                # ensemble mean forecast
-    mse: Dict[str, float]                   # per-model in-sample MSE
+    forecast: pd.Series           # ensemble mean forecast
+    mse: float                    # ensemble in-sample MSE
     from_date: pd.Timestamp
     to_date: pd.Timestamp
 
@@ -76,7 +64,6 @@ def fetch_price_history(
     api_key: str, commodity: str, state: str, market: Optional[str] = None,
     variety: Optional[str] = None, max_records: int = 4000,
 ) -> pd.DataFrame:
-    """Fetch a longer price history for one commodity (optionally market/variety)."""
     filters = {"State": state, "Commodity": commodity}
     if market:
         filters["Market"] = market
@@ -86,7 +73,6 @@ def fetch_price_history(
 
 
 def to_weekly(df: pd.DataFrame) -> pd.Series:
-    """Collapse records to a weekly mean modal-price series."""
     if df.empty or "Modal_Price" not in df.columns:
         return pd.Series(dtype=float)
     s = df.dropna(subset=["Arrival_Date", "Modal_Price"]).set_index("Arrival_Date")["Modal_Price"]
@@ -94,7 +80,6 @@ def to_weekly(df: pd.DataFrame) -> pd.Series:
 
 
 def _make_features(weekly: pd.Series, short: bool) -> pd.DataFrame:
-    """Build lag + seasonal features from a weekly price series."""
     df = weekly.to_frame(name="Price").copy()
     df["lag1"] = df["Price"].shift(1)
     df["lag2"] = df["Price"].shift(2)
@@ -115,7 +100,6 @@ def _recursive_forecast(
     horizon: int, features: List[str], short: bool,
     scaler: Optional[StandardScaler] = None,
 ) -> List[float]:
-    """Predict ``horizon`` weeks ahead, feeding each prediction back as a lag."""
     preds: List[float] = []
     for step in range(horizon):
         lag1 = history[-1]
@@ -137,18 +121,13 @@ def _recursive_forecast(
         if scaler is not None:
             X_row = pd.DataFrame(scaler.transform(X_row), columns=features)
         pred = float(model.predict(X_row)[0])
-        pred = (1 - _SMOOTHING) * pred + _SMOOTHING * lag1  # damp runaway drift
+        pred = (1 - _SMOOTHING) * pred + _SMOOTHING * lag1
         history.append(pred)
         preds.append(pred)
     return preds
 
 
 def forecast_prices(weekly: pd.Series, horizon: int = 8) -> ForecastResult:
-    """Fit an ensemble on the weekly series and forecast ``horizon`` weeks ahead.
-
-    Raises:
-        ValueError: if the series is too short to model.
-    """
     weekly = weekly.dropna()
     if len(weekly) < 6:
         raise ValueError(
@@ -164,35 +143,40 @@ def forecast_prices(weekly: pd.Series, horizon: int = 8) -> ForecastResult:
         raise ValueError("Not enough usable points after feature engineering.")
     X, y = feat[features], feat["Price"]
 
-    # Holdout backtest on the last ~20% (min 2 weeks) when we have room.
-    rmse: Dict[str, float] = {}
+    # Calculate single ensemble RMSE during backtest
+    rmse: Optional[float] = None
     have_backtest = len(feat) >= 8
     if have_backtest:
         split = max(2, int(len(feat) * 0.2))
         Xtr, ytr = X.iloc[:-split], y.iloc[:-split]
         Xte, yte = X.iloc[-split:], y.iloc[-split:]
+        
+        bt_preds = []
+        for name, model in _base_models():
+            bt = type(model)(**model.get_params()).fit(Xtr, ytr)
+            bt_preds.append(bt.predict(Xte))
+        
+        ensemble_bt_preds = np.mean(bt_preds, axis=0)
+        rmse = float(np.sqrt(mean_squared_error(yte, ensemble_bt_preds)))
 
     history_base = list(weekly.values.astype(float))
-    model_forecasts: Dict[str, pd.Series] = {}
+    model_forecasts = []
     idx = pd.date_range(weekly.index[-1] + pd.Timedelta(weeks=1), periods=horizon, freq="W")
 
     for name, model in _base_models():
-        if have_backtest:
-            bt = type(model)(**model.get_params()).fit(Xtr, ytr)
-            rmse[name] = float(np.sqrt(mean_squared_error(yte, bt.predict(Xte))))
         model.fit(X, y)
         preds = _recursive_forecast(model, list(history_base), weekly.index[-1], horizon, features, short)
-        model_forecasts[name] = pd.Series(preds, index=idx, name=name)
+        model_forecasts.append(preds)
 
+    # Average the models into a single forecast series
     ensemble_mean = pd.Series(
-        np.mean([s.values for s in model_forecasts.values()], axis=0), index=idx, name="forecast"
+        np.mean(model_forecasts, axis=0), index=idx, name="forecast"
     )
 
     return ForecastResult(
         history=weekly,
         forecast=ensemble_mean,
-        model_forecasts=model_forecasts,
-        rmse=rmse or None,
+        rmse=rmse,
         training_window=window,
         n_weeks=len(weekly),
     )
@@ -204,13 +188,6 @@ def fit_and_forecast(
     to_date: Optional[str] = None,
     horizon: int = FIT_FORECAST_WEEKS,
 ) -> FitForecastResult:
-    """Train on a (usually recent) slice of the weekly series and forecast a
-    short horizon ahead. Always uses the short feature set, since this mode is
-    meant for compact/recent windows rather than long history.
-
-    Raises:
-        ValueError: if the resulting window is too short to model.
-    """
     weekly = weekly.dropna()
     if from_date:
         weekly = weekly[weekly.index >= pd.Timestamp(from_date)]
@@ -233,32 +210,29 @@ def fit_and_forecast(
     history_base = list(weekly.reindex(feat.index).values.astype(float))
     future_dates = pd.date_range(last_date + pd.Timedelta(weeks=1), periods=horizon, freq="W")
 
-    mse: Dict[str, float] = {}
-    train_fits: Dict[str, pd.Series] = {}
-    forecast_preds: Dict[str, pd.Series] = {}
+    train_fits = []
+    forecast_preds = []
 
     for name, model in _base_models():
         model.fit(X_scaled, y_train)
-        fit_vals = model.predict(X_scaled)
-        mse[name] = round(float(mean_squared_error(y_train, fit_vals)), 2)
-        train_fits[name] = pd.Series(fit_vals, index=feat.index, name=name)
+        train_fits.append(model.predict(X_scaled))
         preds = _recursive_forecast(
             model, list(history_base), last_date, horizon, SHORT_FEATURES, short=True, scaler=scaler,
         )
-        forecast_preds[name] = pd.Series(preds, index=future_dates, name=name)
+        forecast_preds.append(preds)
 
-    forecast_mean = pd.Series(
-        np.mean([s.values for s in forecast_preds.values()], axis=0), index=future_dates, name="forecast",
-    )
+    # Average the fit and forecast arrays, returning single metrics
+    ensemble_train_fit = np.mean(train_fits, axis=0)
+    ensemble_mse = round(float(mean_squared_error(y_train, ensemble_train_fit)), 2)
+    ensemble_forecast = pd.Series(np.mean(forecast_preds, axis=0), index=future_dates, name="forecast")
 
     return FitForecastResult(
         train_dates=feat.index,
         train_actual=feat["Price"],
-        train_fits=train_fits,
+        train_fit=pd.Series(ensemble_train_fit, index=feat.index, name="fit"),
         forecast_dates=future_dates,
-        forecast_preds=forecast_preds,
-        forecast_mean=forecast_mean,
-        mse=mse,
+        forecast=ensemble_forecast,
+        mse=ensemble_mse,
         from_date=weekly.index[0],
         to_date=weekly.index[-1],
     )
